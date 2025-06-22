@@ -1,0 +1,588 @@
+---
+title: "Spotify_Network"
+author: "Anna"
+date: "2025-05-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(igraph)
+library(RColorBrewer)
+library(ggplot2)
+library(reshape2)
+library(dplyr)
+library(stringr)
+library(readr)
+library(wordcloud)
+library(scales)
+library(ggraph)
+library(tidyr)
+library(gganimate)
+library(tidyverse)
+```
+
+# Importazione dati e creazione grafo
+
+```{r}
+
+df <- read.csv("Collaborazioni_finale_oggi.csv", stringsAsFactors = FALSE)
+
+head(df)
+
+df_clean <- df %>%
+  filter(main_artist != featured_artist)
+
+
+df_clean <- df_clean %>%
+  distinct(main_artist, featured_artist, track_name, release_year, .keep_all = TRUE)
+
+nrow(df_clean)
+
+
+write.csv(df_clean, "Collaborazioni_finale_oggi_clean.csv", row.names = FALSE)
+
+artist <- read.csv("artisti.csv")
+artist <- subset(artist, select = -id)
+
+feat <- read.csv("Collaborazioni_finale_oggi_clean.csv")
+colnames(feat)[1:2] <- c("from", "to")
+
+artist$artist <- str_trim(tolower(artist$artist))
+feat$from <- str_trim(tolower(feat$from))
+feat$to <- str_trim(tolower(feat$to))
+
+
+feat_clean <- feat %>%
+  filter(from %in% artist$artist & to %in% artist$artist)
+
+g <- graph_from_data_frame(feat_clean, directed = TRUE, vertices = artist)
+E(g)$release_year <- feat_clean$release_year
+
+cat("Numero nodi:", length(V(g)), "\n")
+cat("Numero archi:", length(E(g)), "\n")
+
+edge_attr_names(g)
+vertex_attr_names(g)
+
+dens <- edge_density(g)
+
+print(paste("Densità:", round(dens, 4)))
+
+```
+
+# Calcolo centralità e PageRank
+
+```{r}
+centralities <- data.frame(
+  node = V(g)$name,
+  degree = degree(g),
+  in_degree = degree(g, mode = "in"),
+  out_degree = degree(g, mode = "out"),
+  pagerank = page_rank(g)$vector,
+  betweenness = betweenness(g),
+  closeness = closeness(g)
+)
+
+g_undirected <- as_undirected(g, mode = "collapse")
+
+centralities$pagerank <- page_rank(g)$vector
+centralities_sorted <- centralities[order(-centralities$pagerank), ]
+head(centralities_sorted, 10)
+
+
+# Top 10 artisti per degree totale
+top_degree <- centralities %>%
+  arrange(desc(degree)) %>%
+  slice_head(n = 10)
+
+ggplot(top_degree, aes(x = reorder(node, degree), y = degree)) +
+  geom_col(fill = "#1cd463") +
+  coord_flip() +
+  labs(
+    title = "Artisti più collaborativi (degree totale)",
+    x = "Artista",
+    y = "Numero totale di collaborazioni"
+  ) +
+  theme_minimal()
+
+# Top 10 artisti in-degree
+
+top_in <- centralities %>%
+  arrange(desc(in_degree)) %>%
+  slice_head(n = 10)
+
+ggplot(top_in, aes(x = reorder(node, in_degree), y = in_degree)) +
+  geom_col(fill = "#3d811c") +
+  coord_flip() +
+  labs(
+    title = "Artisti più richiesti per ft (in-degree)",
+    x = "Artista",
+    y = "Numero di featuring eseguiti come ft-artist"
+  ) +
+  theme_minimal()
+
+# Top 10 artisti out-degree
+
+top_out <- centralities %>%
+  arrange(desc(out_degree)) %>%
+  slice_head(n = 10)
+
+ggplot(top_out, aes(x = reorder(node, out_degree), y = out_degree)) +
+  geom_col(fill = "#27ae60") +
+  coord_flip() +
+  labs(
+    title = "Artisti più attivi nel richiedere ft (out-degree)",
+    x = "Artista",
+    y = "Numero di featuring eseguiti come main-artist"
+  ) +
+  theme_minimal()
+
+
+# Pagerank
+
+top_pagerank_wc <- centralities %>%
+  arrange(desc(pagerank)) %>%
+  slice_head(n = 35)
+
+wordcloud(
+  words = top_pagerank_wc$node,
+  freq = top_pagerank_wc$pagerank,
+  scale = c(4, 0.8),       
+  random.order = FALSE,   
+  rot.per = 0.1,           
+  colors = brewer.pal(8, "Greens")  
+)
+
+
+# Nodi ponte, betweeness
+top_betw <- centralities %>%
+  arrange(desc(betweenness)) %>%
+  slice_head(n = 10)
+
+top_n <- 3
+top_betw_nodes <- top_betw %>%
+  arrange(desc(betweenness)) %>%
+  slice_head(n = top_n)
+
+V(g_undirected)$color <- "lightgrey"
+V(g_undirected)[name %in% top_betw_nodes$node]$color <- "#1cd463"
+E(g_undirected)$color <- "#676b65"
+
+for (node in top_betw_nodes$node) {
+  incident_edges <- incident(g_undirected, V(g_undirected)[name == node], mode = "all")
+  E(g_undirected)[incident_edges]$color <- "#1cd463"
+}
+
+layout_fr <- layout_with_fr(g_undirected)
+
+nodes_df <- data.frame(
+  name = V(g_undirected)$name,
+  color = V(g_undirected)$color,
+  x = layout_fr[,1],
+  y = layout_fr[,2]
+) %>%
+  left_join(top_betw_nodes %>% select(node, betweenness), by = c("name" = "node")) %>%
+  mutate(
+    is_top = !is.na(betweenness),
+    size = ifelse(is_top, scales::rescale(betweenness, to = c(7, 15)), 5)
+  )
+
+ggraph(g_undirected, layout = "manual", x = nodes_df$x, y = nodes_df$y) +  
+  geom_edge_link(aes(color = I(color)), alpha = 0.6) +
+  geom_node_point(data = filter(nodes_df, !is_top), 
+                  aes(x = x, y = y, fill = I(color)), 
+                  shape = 21, size = 5, stroke = 0.8, colour = "black", alpha = 0.3) +
+  geom_node_point(data = filter(nodes_df, is_top), 
+                  aes(x = x, y = y, fill = I(color), size = size), 
+                  shape = 21, stroke = 1, colour = "black") +
+  geom_node_text(data = filter(nodes_df, is_top),
+                 aes(x = x, y = y, label = name), repel = TRUE, size = 3, color = "black") +
+  theme_void() +
+  guides(size = "none")
+
+
+top_n <- 3
+
+# Top nodi per Closeness
+
+top_close_nodes <- centralities %>%
+  arrange(desc(closeness)) %>%
+  slice_head(n = top_n)
+
+V(g_undirected)$color <- "lightgrey"
+V(g_undirected)[name %in% top_close_nodes$node]$color <- "#1cd463"
+E(g_undirected)$color <- "#676b65"
+
+
+for (node in top_close_nodes$node) {
+  incident_edges <- incident(g_undirected, V(g_undirected)[name == node], mode = "all")
+  E(g_undirected)[incident_edges]$color <- "#1cd463"
+}
+
+
+layout_fr <- layout_with_fr(g_undirected)
+
+
+nodes_df <- data.frame(
+  name = V(g_undirected)$name,
+  color = V(g_undirected)$color,
+  x = layout_fr[,1],
+  y = layout_fr[,2]
+) %>%
+  left_join(top_close_nodes %>% select(node, closeness), by = c("name" = "node")) %>%
+  mutate(
+    is_top = !is.na(closeness),
+    size = ifelse(is_top, scales::rescale(closeness, to = c(7, 15)), 5)
+  )
+
+
+ggraph(g_undirected, layout = "manual", x = nodes_df$x, y = nodes_df$y) +  
+  geom_edge_link(aes(color = I(color)), alpha = 0.6) +
+  geom_node_point(data = filter(nodes_df, !is_top), 
+                  aes(x = x, y = y, fill = I(color)), 
+                  shape = 21, size = 5, stroke = 0.8, colour = "black", alpha = 0.3) +
+  geom_node_point(data = filter(nodes_df, is_top), 
+                  aes(x = x, y = y, fill = I(color), size = size), 
+                  shape = 21, stroke = 1, colour = "black") +
+  geom_node_text(data = filter(nodes_df, is_top),
+                 aes(x = x, y = y, label = name), repel = TRUE, size = 3, color = "black") +
+  theme_void() +
+  guides(size = "none")
+
+
+```
+
+# Confronto centralità: degree, betweenness, closeness, PageRank
+
+```{r, warning = FALSE}
+
+bet <- betweenness(g, normalized = TRUE)
+close <- closeness(g, normalized = TRUE)
+pr <- page_rank(g)$vector
+deg <- degree(g)
+
+centralities <- data.frame(
+  artist = V(g)$name,
+  degree = deg,
+  betweenness = bet,
+  closeness = close,
+  pagerank = pr
+)
+
+centralities_melt <- melt(centralities, id.vars = "artist")
+
+green_palette <- c("#1b4d3e", "#3d811c", "#1cd463", "#d9f0a3")  
+
+ggplot(centralities_melt, aes(x = value, fill = variable)) +
+  geom_histogram(bins = 50, alpha = 0.7, position = "identity") +
+  facet_wrap(~variable, scales = "free_x") +
+  scale_fill_manual(values = green_palette) +
+  labs(x = "Valore centralità",
+       y = "Frequenza") +
+  theme_minimal()
+
+```
+
+# Analisi di reciprocità del grafo
+
+```{r}
+library(igraph)
+library(ggplot2)
+library(dplyr)
+
+recip <- reciprocity(g)
+
+recip_data <- data.frame(
+  tipo = c("Ft reciproci", "Ft non reciproci"),
+  valore = c(recip, 1 - recip)
+) %>%
+  mutate(
+    percentuale = paste0(round(valore * 100, 1), "%"),
+    ypos = cumsum(valore) - 0.5 * valore
+  )
+
+ggplot(recip_data, aes(x = "", y = valore, fill = tipo)) +
+  geom_bar(stat = "identity", width = 1, color = "white") +
+  coord_polar("y", start = 0) +
+  geom_text(aes(y = ypos, label = percentuale), color = "white", size = 5) +
+  scale_fill_manual(values = c("Ft reciproci" = "#3d811c", "Ft non reciproci" = "#1cd463")) +
+  labs(title = paste0("Reciprocità del grafo: ", round(recip * 100, 2), "%")) +
+  theme_void() +
+  theme(legend.title = element_blank())
+
+```
+
+# Transitività
+
+```{r}
+
+trans_global <- transitivity(g, type = "global")
+cat("Transitività globale:", trans_global, "\n")
+
+
+```
+
+# Analisi di assortatività per genere
+
+```{r}
+
+
+if (!"genres" %in% vertex_attr_names(g)) {
+  stop("L'attributo 'genres' non è presente nel grafo.")
+}
+
+edge_filter <- E(g)[release_year >= 2009 & release_year <= 2024]
+
+g_sub <- subgraph_from_edges(g, eids = edge_filter, delete.vertices = TRUE)
+
+assort_genre <- assortativity_nominal(g_sub, types = as.factor(V(g_sub)$genres))
+cat("Assortatività per genere musicale (2009-2024):", round(assort_genre, 3), "\n")
+
+years <- 2009:2024
+assortativity_values <- numeric(length(years))
+
+for (i in seq_along(years)) {
+  year_i <- years[i]
+  
+  edge_filter <- E(g)[release_year == year_i]
+  
+  if (length(edge_filter) > 0) {
+    g_sub <- subgraph_from_edges(g, eids = edge_filter, delete.vertices = TRUE)
+    
+    genres <- V(g_sub)$genres
+    if (!is.null(genres) && length(unique(genres)) > 1) {
+      assortativity_values[i] <- assortativity_nominal(g_sub, types = as.factor(genres))
+    } else {
+      assortativity_values[i] <- NA
+    }
+  } else {
+    assortativity_values[i] <- NA
+  }
+}
+
+df <- data.frame(Anno = years, Assortativita = assortativity_values)
+
+ggplot(df, aes(x = Anno, y = Assortativita)) +
+  geom_line(color = "#1cd463", linewidth = 1.2) +
+  geom_point(color = "#1cd463", size = 2) +
+  geom_smooth(method = "loess", se = FALSE, color = "gray40", linetype = "dashed") +
+  labs(
+    title = "Evoluzione dell'assortatività per genere musicale (2009–2024)",
+    x = "Anno", y = "Indice di assortatività"
+  ) +
+  theme_minimal()
+
+```
+
+# Collaborazioni intra-genere nel tempo
+
+```{r}
+edges_df <- igraph::as_data_frame(g, what = "edges")
+
+edges_df$from_genre <- V(g)$genres[match(edges_df$from, V(g)$name)]
+edges_df$to_genre   <- V(g)$genres[match(edges_df$to, V(g)$name)]
+edges_df$same_genre <- edges_df$from_genre == edges_df$to_genre
+
+edges_df$year <- E(g)$release_year
+
+intra_genre_by_year <- edges_df %>%
+  filter(year >= 2009 & year <= 2024) %>%
+  group_by(year) %>%
+  summarise(
+    intra = sum(same_genre, na.rm = TRUE),
+    inter = sum(!same_genre, na.rm = TRUE)
+  )
+
+intra_genre_long <- pivot_longer(intra_genre_by_year, cols = c("intra", "inter"),
+                                  names_to = "type", values_to = "count")
+
+ggplot(intra_genre_long, aes(x = year, y = count, color = type)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2) +
+  theme_minimal() +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 10)) +
+  scale_color_manual(
+    values = c("intra" = "#1cd463", 
+               "inter" = "#3d811c")  
+  ) +
+  labs(title = "Collaborazioni intra- vs inter-genere (2009–2024)",
+       x = "Anno", y = "Numero di collaborazioni",
+       color = "Tipo di ft")
+
+```
+
+# Analisi temporale: numero di collaborazioni per anno
+
+```{r}
+
+years <- E(g)$release_year
+year_table <- as.data.frame(table(years))
+colnames(year_table) <- c("year", "collaborations")
+year_table$year <- as.numeric(as.character(year_table$year))
+year_table <- year_table[order(year_table$year), ]
+
+year_table_filtered <- subset(year_table, year >= 2009 & year <= 2024)
+
+ggplot(year_table_filtered, aes(x = year, y = collaborations)) +
+  geom_line(color = "#1cd463", linewidth = 1.2) +
+  geom_point(color = "#1cd463", size = 2) +
+  theme_minimal() +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 10)) +
+  labs(title = "Evoluzione delle collaborazioni nel tempo (2009-2024)",
+       x = "Anno",
+       y = "Numero di collaborazioni")
+```
+
+# Visualizzazione crescita del grafo
+
+```{r}
+
+df <- read_csv("collaborazioni_finale_oggi_clean.csv") %>%
+  filter(release_year >= 2009) %>%
+  distinct(main_artist, featured_artist, release_year)
+
+years <- sort(unique(df$release_year))
+
+g_full <- graph_from_data_frame(df %>% select(main_artist, featured_artist), directed = TRUE)
+
+lay <- layout_with_kk(g_full)
+
+lay_df <- as.data.frame(lay) %>%
+  setNames(c("x", "y")) %>%
+  mutate(node = V(g_full)$name)
+
+nodes_list <- list()
+edges_list <- list()
+
+for (year in years) {
+
+  temp_edges <- df %>% filter(release_year <= year) %>% select(main_artist, featured_artist)
+  g_year <- graph_from_data_frame(temp_edges, directed = TRUE, vertices = V(g_full)$name)
+  active_nodes <- V(g_year)$name
+  
+  nodes_list[[as.character(year)]] <- lay_df %>%
+    filter(node %in% active_nodes) %>%
+    mutate(year = year)
+  
+  edges_df <- igraph::as_data_frame(g_year, what = "edges") %>%
+    left_join(lay_df, by = c("from" = "node")) %>%
+    left_join(lay_df, by = c("to" = "node"), suffix = c("", "_end")) %>%
+    mutate(year = year)
+  
+  edges_list[[as.character(year)]] <- edges_df
+}
+
+nodes_all <- bind_rows(nodes_list)
+edges_all <- bind_rows(edges_list)
+
+p <- ggplot() +
+  geom_segment(data = edges_all,
+               aes(x = x, y = y, xend = x_end, yend = y_end),
+               alpha = 0.3, color = "#676b65") +
+  geom_point(data = nodes_all,
+             aes(x = x, y = y),
+             size = 2, color = "#1cd463") +
+  theme_void() +
+  ggtitle("Anno: {closest_state}") +
+  transition_states(year, transition_length = 2, state_length = 1) +
+  ease_aes("cubic-in-out")
+
+```
+
+```{r export-gif, eval=FALSE}
+animate(p, nframes = length(years) * 3, fps = 10, width = 800, height = 600,
+        renderer = gifski_renderer("network_evolution.gif"))
+```
+
+```{r show-gif, echo=FALSE, out.width="800px"}
+knitr::include_graphics("network_evolution.gif")
+```
+
+# Girvan-Newman
+
+```{r}
+
+g_undirected <- as_undirected(g, mode = "collapse")
+
+girvan_comm <- cluster_edge_betweenness(g_undirected)
+
+comm_sizes <- sizes(girvan_comm)
+sorted_indices <- order(comm_sizes, decreasing = TRUE)
+top_n <- 3
+top_comms <- sorted_indices[1:top_n]
+
+cat("Girvan-Newman - numero totale comunità:", length(comm_sizes), "\n\n")
+for (i in seq_along(sorted_indices)) {
+  cat(sprintf("Comunità %d: %d nodi\n", sorted_indices[i], comm_sizes[sorted_indices[i]]))
+}
+
+green_palette <- c("#d9f0a3", "#78c679", "#238443")
+grey_color <- "#B0B0B0"
+community_colors <- rep(grey_color, length(comm_sizes))
+community_colors[top_comms] <- green_palette
+
+V(g_undirected)$color <- community_colors[membership(girvan_comm)]
+
+ggraph(g_undirected, layout = "fr") +  
+  geom_edge_link(alpha = 0.4, color = "#676b65") +
+  geom_node_point(aes(fill = I(color)), shape = 21, size = 4, stroke = 0.8, colour = "black") +
+  theme_void() +
+  labs(title = "Community detection")
+
+
+```
+
+# Heatmap generi vs comunità
+
+```{r}
+
+membership_girvan <- membership(girvan_comm)
+
+df_gen_comm <- data.frame(
+  artist = names(membership_girvan),
+  community = as.factor(membership_girvan),
+  genre = V(g_undirected)$genres[match(names(membership_girvan), V(g_undirected)$name)]
+)
+
+top_3_communities <- df_gen_comm %>%
+  count(community) %>%
+  arrange(desc(n)) %>%
+  slice(1:3) %>%
+  pull(community)
+
+df_top3 <- df_gen_comm %>%
+  filter(community %in% top_3_communities, !is.na(genre))
+
+genre_community_prop <- df_top3 %>%
+  count(genre, community) %>%
+  group_by(community) %>%
+  mutate(proportion = n / sum(n)) %>%
+  ungroup()
+
+genre_community_table <- genre_community_prop %>%
+  select(genre, community, proportion) %>%
+  pivot_wider(names_from = community, values_from = proportion, values_fill = 0)
+
+heatmap_data <- melt(genre_community_table, id.vars = "genre")
+
+colnames(heatmap_data) <- c("Genre", "Community", "Proportion")
+
+ggplot(heatmap_data, aes(x = Community, y = Genre, fill = Proportion)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(low = "white", high = "#1cd463") +
+  labs(
+    title = "Distribuzione dei generi per comunità",
+    x = "Comunità",
+    y = "Genere",
+    fill = "Proporzione"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid = element_blank()
+  )
+
+```
+
+
