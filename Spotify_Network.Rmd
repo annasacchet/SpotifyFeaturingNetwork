@@ -289,25 +289,19 @@ ggplot(paradox_data, aes(x = "", y = valore, fill = condizione)) +
   theme(legend.title = element_blank())
 ```
 
-# Analisi di assortatività per genere
+# Analisi di assortatività per grado
 
-```{r}
-# Verifica presenza attributo generi
-if (!"genres" %in% vertex_attr_names(g)) {
-  stop("L'attributo 'genres' non è presente nel grafo.")
-}
-
-# Assortatività globale
+```{r warning = FALSE}
+# Assortatività globale per grado
 g_sub <- subgraph_from_edges(g, E(g)[release_year >= 2009 & release_year <= 2024], 
                             delete.vertices = TRUE)
-assort_genre <- assortativity_nominal(g_sub, types = as.factor(V(g_sub)$genres))
-cat("Assortatività per genere musicale:", round(assort_genre, 3), "\n")
+assort_degree <- assortativity_degree(g_sub)
+cat("Assortatività per grado:", round(assort_degree, 3), "\n")
 
 # Assortatività per anno
 assort_data <- analyze_by_year(g, 2009:2024, function(g_year) {
-  genres <- V(g_year)$genres
-  if (!is.null(genres) && length(unique(genres)) > 1) {
-    assortativity_nominal(g_year, types = as.factor(genres))
+  if (ecount(g_year) > 0 && vcount(g_year) > 1) {
+    assortativity_degree(g_year)
   } else {
     NA
   }
@@ -317,7 +311,7 @@ ggplot(assort_data, aes(x = anno, y = valore)) +
   geom_line(color = "#1cd463", linewidth = 1.2) +
   geom_point(color = "#1cd463", size = 2) +
   geom_smooth(method = "loess", se = FALSE, color = "gray40", linetype = "dashed") +
-  labs(title = "Evoluzione dell'assortatività per genere musicale",
+  labs(title = "Evoluzione dell'assortatività per grado",
        x = "Anno", y = "Indice di assortatività") +
   theme_minimal()
 ```
